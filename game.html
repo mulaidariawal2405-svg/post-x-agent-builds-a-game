@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ghost Dash — a tiny game built from one prompt</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #0d0a1a; height: 100%; }
+  body { display: flex; align-items: center; justify-content: center; font-family: monospace; }
+  #wrap { position: relative; width: min(100vw, 56.25vh); aspect-ratio: 9 / 16; }
+  canvas { display: block; width: 100%; height: 100%; background: #160f2e; touch-action: none; }
+  #hint {
+    position: absolute; left: 0; right: 0; bottom: 12px; text-align: center;
+    color: #cfc4f5; font-size: 13px; pointer-events: none; opacity: .8;
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="540" height="960"></canvas>
+  <div id="hint">Move: &larr; &rarr; or A / D &middot; touch and drag &middot; click to start</div>
+</div>
+<script>
+'use strict';
+// Ghost Dash: a tiny browser game built from one prompt.
+// "Build me a tiny browser game: a little ghost dodges falling stars and
+// collects coins. Arrow keys or A/D to move, score for every coin, 3 lives,
+// game over screen." No libraries, no assets, no network: one file.
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = 540, H = 960;
+
+// Seeded random so a demo run is reproducible; gameplay uses Math.random.
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+const GHOST_Y = 820;
+const GHOST_R = 34;
+const STAR_R = 20;
+const COIN_R = 16;
+
+const state = {
+  mode: 'title', // title | playing | over
+  score: 0,
+  lives: 3,
+  ghostX: W / 2,
+  targetX: W / 2,
+  stars: [],
+  coins: [],
+  sparks: [],
+  bgStars: [],
+  frame: 0,
+  flash: 0,
+  shake: 0,
+};
+
+function reset() {
+  state.score = 0;
+  state.lives = 3;
+  state.ghostX = W / 2;
+  state.targetX = W / 2;
+  state.stars = [];
+  state.coins = [];
+  state.sparks = [];
+  state.frame = 0;
+  state.flash = 0;
+  state.shake = 0;
+}
+
+function initBackground() {
+  const rnd = mulberry32(20261122);
+  state.bgStars = [];
+  for (let i = 0; i < 70; i++) {
+    state.bgStars.push({
+      x: rnd() * W,
+      y: rnd() * H,
+      r: 1 + rnd() * 2,
+      tw: rnd() * Math.PI * 2,
+    });
+  }
+}
+
+function spawnStar() {
+  state.stars.push({
+    x: 30 + Math.random() * (W - 60),
+    y: -30,
+    vy: 3.2 + Math.random() * 2.4 + state.frame / 3600,
+    spin: Math.random() * Math.PI * 2,
+    vspin: (Math.random() - 0.5) * 0.06,
+  });
+}
+
+function spawnCoin() {
+  state.coins.push({
+    x: 30 + Math.random() * (W - 60),
+    y: -30,
+    vy: 2.6 + Math.random() * 1.2,
+    phase: Math.random() * Math.PI * 2,
+  });
+}
+
+function burst(x, y, color, n) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const sp = 1 + Math.random() * 4;
+    state.sparks.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 1, life: 24, color });
+  }
+}
+
+function update() {
+  if (state.mode !== 'playing') return;
+  state.frame++;
+
+  // Ghost glides toward its target (keyboard or pointer).
+  const dx = state.targetX - state.ghostX;
+  state.ghostX += dx * 0.22;
+  state.ghostX = Math.max(GHOST_R, Math.min(W - GHOST_R, state.ghostX));
+
+  // Spawn cadence: a star about every 26 frames, a coin about every 70.
+  if (state.frame % 26 === 0) spawnStar();
+  if (state.frame % 70 === 0) spawnCoin();
+
+  for (const s of state.stars) {
+    s.y += s.vy;
+    s.spin += s.vspin;
+  }
+  for (const c of state.coins) {
+    c.y += c.vy;
+    c.phase += 0.12;
+  }
+  for (const p of state.sparks) {
+    p.x += p.vx; p.y += p.vy; p.vy += 0.12; p.life--;
+  }
+  state.sparks = state.sparks.filter((p) => p.life > 0);
+  state.stars = state.stars.filter((s) => s.y < H + 40);
+  state.coins = state.coins.filter((c) => c.y < H + 40);
+
+  // Coins: collect.
+  for (let i = state.coins.length - 1; i >= 0; i--) {
+    const c = state.coins[i];
+    const d = Math.hypot(c.x - state.ghostX, c.y - GHOST_Y);
+    if (d < COIN_R + GHOST_R - 6) {
+      state.coins.splice(i, 1);
+      state.score += 10;
+      burst(c.x, c.y, '#ffd94a', 10);
+    }
+  }
+
+  // Stars: dodge or lose a life.
+  for (let i = state.stars.length - 1; i >= 0; i--) {
+    const s = state.stars[i];
+    const d = Math.hypot(s.x - state.ghostX, s.y - GHOST_Y);
+    if (d < STAR_R + GHOST_R - 10) {
+      state.stars.splice(i, 1);
+      state.lives--;
+      state.flash = 12;
+      state.shake = 10;
+      burst(state.ghostX, GHOST_Y, '#ff5d73', 16);
+      if (state.lives <= 0) {
+        state.mode = 'over';
+        return;
+      }
+    }
+  }
+
+  if (state.flash > 0) state.flash--;
+  if (state.shake > 0) state.shake--;
+}
+
+function drawStarShape(x, y, r, rot) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(rot);
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const ang = (i * Math.PI) / 5 - Math.PI / 2;
+    const rad = i % 2 === 0 ? r : r * 0.45;
+    const px = Math.cos(ang) * rad;
+    const py = Math.sin(ang) * rad;
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawGhost(x, y, bob) {
+  const yy = y + Math.sin(bob) * 5;
+  ctx.save();
+  ctx.translate(x, yy);
+  // Body: a rounded sheet with a wavy hem.
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.arc(0, -6, GHOST_R, Math.PI, 0);
+  ctx.lineTo(GHOST_R, 18);
+  for (let i = 0; i < 3; i++) {
+    const cx = GHOST_R - (i + 0.5) * ((GHOST_R * 2) / 3);
+    ctx.quadraticCurveTo(cx, 30, cx - GHOST_R / 3, 18);
+  }
+  ctx.lineTo(-GHOST_R, -6);
+  ctx.closePath();
+  ctx.fill();
+  // Eyes and a small open mouth.
+  ctx.fillStyle = '#191419';
+  ctx.beginPath();
+  ctx.arc(-12, -10, 6, 0, Math.PI * 2);
+  ctx.arc(12, -10, 6, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(0, 6, 6, 8, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawHeart(x, y, s, filled) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(s, s);
+  ctx.fillStyle = filled ? '#ff5d73' : 'rgba(255,255,255,0.18)';
+  ctx.beginPath();
+  ctx.moveTo(0, 6);
+  ctx.bezierCurveTo(-11, -4, -6, -12, 0, -6);
+  ctx.bezierCurveTo(6, -12, 11, -4, 0, 6);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawText(text, x, y, size, color, align) {
+  ctx.fillStyle = color;
+  ctx.font = 'bold ' + size + 'px monospace';
+  ctx.textAlign = align || 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, x, y);
+}
+
+function draw() {
+  ctx.save();
+  if (state.shake > 0) {
+    ctx.translate((Math.random() - 0.5) * state.shake, (Math.random() - 0.5) * state.shake);
+  }
+
+  // Night-sky background.
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, '#1c1140');
+  grad.addColorStop(0.6, '#120b28');
+  grad.addColorStop(1, '#0d0a1a');
+  ctx.fillStyle = grad;
+  ctx.fillRect(-20, -20, W + 40, H + 40);
+
+  for (const b of state.bgStars) {
+    const a = 0.35 + 0.4 * Math.abs(Math.sin(state.frame * 0.02 + b.tw));
+    ctx.fillStyle = 'rgba(255,255,255,' + a.toFixed(2) + ')';
+    ctx.beginPath();
+    ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Coins.
+  for (const c of state.coins) {
+    const wob = Math.cos(c.phase) * 0.4 + 0.6;
+    ctx.fillStyle = '#ffd94a';
+    ctx.beginPath();
+    ctx.ellipse(c.x, c.y, COIN_R * (0.5 + 0.5 * wob), COIN_R, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#b8860b';
+    ctx.beginPath();
+    ctx.ellipse(c.x, c.y, COIN_R * 0.35 * wob + 2, COIN_R * 0.55, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Falling stars.
+  ctx.fillStyle = '#ffb02e';
+  for (const s of state.stars) drawStarShape(s.x, s.y, STAR_R, s.spin);
+
+  // Sparks.
+  for (const p of state.sparks) {
+    ctx.globalAlpha = Math.max(0, p.life / 24);
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x - 2, p.y - 2, 4, 4);
+  }
+  ctx.globalAlpha = 1;
+
+  if (state.mode !== 'title') drawGhost(state.ghostX, GHOST_Y, state.frame * 0.08);
+
+  // HUD: score left, lives right.
+  drawText('SCORE ' + state.score, 20, 42, 28, '#ffffff');
+  for (let i = 0; i < 3; i++) drawHeart(W - 30 - i * 34, 42, 1.4, i < state.lives);
+
+  if (state.mode === 'title') {
+    ctx.fillStyle = 'rgba(13,10,26,0.72)';
+    ctx.fillRect(0, 0, W, H);
+    drawText('GHOST DASH', W / 2, 330, 64, '#ffffff', 'center');
+    drawText('one prompt. one game.', W / 2, 400, 26, '#cfc4f5', 'center');
+    drawText('dodge the stars', W / 2, 520, 28, '#ffb02e', 'center');
+    drawText('collect the coins', W / 2, 560, 28, '#ffd94a', 'center');
+    drawText('3 lives. good luck.', W / 2, 600, 28, '#ffffff', 'center');
+    drawText('CLICK OR TAP TO PLAY', W / 2, 720, 26, '#7ee787', 'center');
+  }
+
+  if (state.mode === 'over') {
+    ctx.fillStyle = 'rgba(13,10,26,0.78)';
+    ctx.fillRect(0, 0, W, H);
+    drawText('GAME OVER', W / 2, 380, 62, '#ff5d73', 'center');
+    drawText('SCORE ' + state.score, W / 2, 470, 34, '#ffffff', 'center');
+    drawText('the ghost got starstruck.', W / 2, 520, 24, '#cfc4f5', 'center');
+    drawText('CLICK TO PLAY AGAIN', W / 2, 640, 26, '#7ee787', 'center');
+  }
+
+  if (state.flash > 0) {
+    ctx.fillStyle = 'rgba(255,93,115,' + (state.flash / 40).toFixed(2) + ')';
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  ctx.restore();
+}
+
+function loop() {
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+
+function startGame() {
+  if (state.mode === 'playing') return;
+  reset();
+  state.mode = 'playing';
+}
+
+function moveTo(clientX) {
+  const rect = canvas.getBoundingClientRect();
+  const x = ((clientX - rect.left) / rect.width) * W;
+  state.targetX = Math.max(GHOST_R, Math.min(W - GHOST_R, x));
+}
+
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') {
+    state.targetX = Math.max(GHOST_R, state.targetX - 46);
+  } else if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') {
+    state.targetX = Math.min(W - GHOST_R, state.targetX + 46);
+  } else if (e.key === 'Enter' || e.key === ' ') {
+    startGame();
+  }
+});
+
+canvas.addEventListener('pointerdown', (e) => {
+  if (state.mode !== 'playing') startGame();
+  moveTo(e.clientX);
+});
+canvas.addEventListener('pointermove', (e) => {
+  if (state.mode === 'playing' && e.buttons > 0) moveTo(e.clientX);
+});
+
+initBackground();
+loop();
+</script>
+</body>
+</html>
